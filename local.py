@@ -17,6 +17,10 @@ import pandas as pd
 import plotly.graph_objs as go
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
+import numpy as np
+import cv2
+from PIL import Image
+from io import BytesIO
 
 
 def input_field(title, state_id, state_value, state_max, state_min):
@@ -49,6 +53,41 @@ def input_field(title, state_id, state_value, state_max, state_min):
             }
         )
     ]
+    )
+def merge(a, b):
+    return dict(a, **b)
+
+def numpy_to_b64(array, scalar=False):
+    # Convert from 0-1 to 0-255
+    if scalar:
+        array = np.uint8(255 * array)
+
+    im_pil = Image.fromarray(array)
+    buff = BytesIO()
+    im_pil.save(buff, format="png")
+    im_b64 = base64.b64encode(buff.getvalue()).decode("utf-8")
+
+    return im_b64
+
+def omit(omitted_keys, d):
+    return {k: v for k, v in d.items() if k not in omitted_keys}
+
+def Card(children, **kwargs):
+    return html.Section(
+        children,
+        style=merge({
+            'padding': 20,
+            'margin': 5,
+            'borderRadius': 5,
+            'border': 'thin lightgrey solid',
+
+            # Remove possibility to select the text for better UX
+            'user-select': 'none',
+            '-moz-user-select': 'none',
+            '-webkit-user-select': 'none',
+            '-ms-user-select': 'none'
+        }, kwargs.get('style', {})),
+        **omit(['style'], kwargs)
     )
 
 # Generate the default scatter plot
@@ -95,6 +134,10 @@ local_layout = html.Div([
         style={'display': 'none'}
     ),
 
+    html.Div(
+        id="images-df-and-message",
+        style={'display': 'none'}
+    ),
     # Main app
     html.Div([
         html.H2(
@@ -207,6 +250,23 @@ local_layout = html.Div([
                 max_size=-1
             ),
 
+            dcc.Upload(
+                id='upload-images',
+                children=html.A('Upload your images csv here.'),
+                style={
+                    'height': '45px',
+                    'line-height': '45px',
+                    'border-width': '1px',
+                    'border-style': 'dashed',
+                    'border-radius': '5px',
+                    'text-align': 'center',
+                    'margin-top': '5px',
+                    'margin-bottom': '5px'
+                },
+                multiple=False,
+                max_size=-1
+            ),
+
             html.Div([
                 html.P(id='upload-data-message',
                        style={
@@ -214,6 +274,11 @@ local_layout = html.Div([
                        }),
 
                 html.P(id='upload-label-message',
+                       style={
+                           'margin-bottom': '0px'
+                       }),
+
+                html.P(id='upload-images-message',
                        style={
                            'margin-bottom': '0px'
                        }),
@@ -231,7 +296,18 @@ local_layout = html.Div([
                     'margin-bottom': '2px',
                     'margin-top': '2px'
                 }
-            )
+            ),
+            Card(style={'padding': '5px'}, children=[
+                    html.Div(id='div-plot-click-message',
+                             style={'text-align': 'center',
+                                    'margin-bottom': '7px',
+                                    'font-weight': 'bold'}
+                             ),
+
+                    html.Div(id='div-plot-click-image'),
+
+                    html.Div(id='div-plot-click-wordemb')
+                ])
         ],
             className="four columns",
             style={
@@ -331,6 +407,20 @@ def local_callbacks(app):
 
         return [label_df.to_json(orient="split"), message]
 
+    @app.callback(Output('images-df-and-message', 'children'),
+                  [Input('upload-images', 'contents'),
+                   Input('upload-images', 'filename')])
+    def parse_images(contents, filename):
+        images_df, message = parse_content(contents, filename)
+
+        if images_df is None:
+            return [None, message]
+
+        # elif label_df.shape[1] != 1:
+        #     return [None, f'The dimensions of {filename} are invalid.']
+
+        return [images_df.to_json(orient="split"), message]
+
     # Hidden Data Div --> Display upload status message (Data)
     @app.callback(Output('upload-data-message', 'children'),
                   [Input('data-df-and-message', 'children')])
@@ -341,6 +431,11 @@ def local_callbacks(app):
     @app.callback(Output('upload-label-message', 'children'),
                   [Input('label-df-and-message', 'children')])
     def output_upload_status_label(data):
+        return data[1]
+
+    @app.callback(Output('upload-images-message', 'children'),
+                  [Input('images-df-and-message', 'children')])
+    def output_upload_status_images(data):
         return data[1]
 
     # Button Click --> Update graph with states
@@ -418,6 +513,8 @@ def local_callbacks(app):
 
                 # Group by the values of the label
                 for idx, val in combined_df.groupby('label'):
+                # for idx, val in combined_df.iterrows():
+                    # print(idx, val)
                     scatter = go.Scatter3d(
                         name=idx,
                         x=val['x'],
@@ -504,3 +601,72 @@ def local_callbacks(app):
 
         else:
             return []
+
+    @app.callback(Output('div-plot-click-image', 'children'),
+                  [Input('tsne-3d-plot', 'clickData')],
+                  [State('images-df-and-message', 'children')])
+    def display_click_image(clickData, images_div):
+        if clickData:
+            # Load the same dataset as the one displayed
+            # path = f'demo_embeddings/{dataset}/iterations_{iterations}/perplexity_{perplexity}/pca_{pca_dim}/learning_rate_{learning_rate}'
+
+            # try:
+            #     embedding_df = pd.read_csv(path + f'/data.csv', encoding="ISO-8859-1")
+
+            # except FileNotFoundError as error:
+            #     print(error, "\nThe dataset was not found. Please generate it using generate_demo_embeddings.py")
+            #     return
+
+
+
+            # Convert the point clicked into float64 numpy array
+            click_point_np = np.array([clickData['points'][0][i] for i in ['x', 'y', 'z']]).astype(np.float64)
+            scatter = data[-1]
+            flag = False
+            # print(scatter.ids[0])
+            for scatter in data:
+                indices = scatter.x.index
+                for i, ind in enumerate(indices):
+                    point_np = np.array([scatter.x.iloc[i], scatter.y.iloc[i], scatter.z.iloc[i]])
+                    if np.all(click_point_np == point_np):
+                        flag = True
+                        break
+                if flag:
+                    break
+
+            if flag:
+                clicked_idx = ind
+                print(clicked_idx)
+            # print(dir(scatter))
+            # print(scatter.ids)
+            # print(scatter.x.index)
+            # print(len(data))
+            # # Create a boolean mask of the point clicked, truth value exists at only one row
+            # # bool_mask_click = tsne_data_df.loc[:, 'x':'z'].eq(click_point_np).all(axis=1)
+            # # Retrieve the index of the point clicked, given it is present in the set
+            # bool_mask_click = np.array([False])
+            # if bool_mask_click.any():
+                # clicked_idx = tsne_data_df[bool_mask_click].index[0]
+                images_df = pd.read_json(images_div[0], orient="split")
+                # print(images_df)
+                # Retrieve the image corresponding to the index
+                image_path = images_df[0].iloc[clicked_idx]
+                print(str(image_path))
+                image_np = cv2.imread(str(image_path))
+                # if dataset == 'cifar_gray_3000':
+                #     image_np = image_vector.values.reshape(32, 32).astype(np.float64)
+                # else:
+                #     image_np = image_vector.values.reshape(28, 28).astype(np.float64)
+
+                # # Encode image into base 64
+                image_b64 = numpy_to_b64(image_np[...,::-1])
+
+                return html.Img(
+                    src='data:image/png;base64, ' + image_b64,
+                    style={
+                        'height': '25vh',
+                        'display': 'block',
+                        'margin': 'auto'
+                    }
+                )
+        return None
